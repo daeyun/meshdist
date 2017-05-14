@@ -1,4 +1,5 @@
-cmake_minimum_required(VERSION 3.7)
+cmake_minimum_required(VERSION 3.4)
+
 project(meshdist)
 
 set(CMAKE_CXX_STANDARD 14)
@@ -6,18 +7,36 @@ set(CMAKE_CXX_STANDARD 14)
 find_package(OpenMP REQUIRED)
 find_package(Eigen3 REQUIRED)
 
-FIND_PACKAGE(Boost 1.5 REQUIRED)
+find_package(Boost 1.5 REQUIRED)
+
+enable_testing()
+find_package(GTest REQUIRED)
+
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS} ")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Ofast -march=native -funroll-loops -mfpmath=both")
 
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Ofast -march=native -funroll-loops -mfpmath=sse -ftree-vectorize")
 
-set(SOURCE_FILES main.cc meshdist.h)
+set(SOURCE_FILES meshdist.h meshdist.cc)
+
+add_subdirectory(third_party)
 
 include_directories(${EIGEN3_INCLUDE_DIRS})
 include_directories(${Boost_INCLUDE_DIR})
+include_directories(${TRIMESH2_INCLUDE_DIR})
 include_directories(third_party)
-add_executable(meshdist ${SOURCE_FILES})
 
-add_executable(tests test_meshdist.cc)
+
+add_library(meshdist STATIC ${SOURCE_FILES})
+target_link_libraries(meshdist ${TRIMESH2_LIBRARY})
+
+
+add_executable(main main.cc)
+target_link_libraries(main meshdist)
+
+
+include_directories(${GTEST_INCLUDE_DIRS})
+add_executable(tests meshdist_test.cc)
+target_link_libraries(tests ${GTEST_BOTH_LIBRARIES})
+target_link_libraries(tests meshdist)
