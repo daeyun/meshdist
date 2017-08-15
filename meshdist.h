@@ -5,6 +5,21 @@
 #ifndef MESHDIST_MESHDIST_H
 #define MESHDIST_MESHDIST_H
 
+#ifndef NDEBUG
+#define USE_OMP 0
+#define OMP_NUM_THREADS 0
+#else
+#define USE_OMP 1
+#endif
+
+#ifndef SCHEDULE
+#define SCHEDULE guided
+#endif
+
+#ifndef SAMPLING_DENSITY
+#define SAMPLING_DENSITY 300
+#endif
+
 #include <random>
 #include <memory>
 #include <chrono>
@@ -13,13 +28,7 @@
 #include <type_traits>
 #include <iostream>
 #include <boost/optional.hpp>
-
-#ifndef NDEBUG
-#define USE_OMP 0
-#define OMP_NUM_THREADS 0
-#else
-#define USE_OMP 1
-#endif
+#include <boost/log/trivial.hpp>
 
 #include <omp.h>
 
@@ -57,9 +66,16 @@ constexpr Float kEpsilon = 1e-8;
 
 enum class Part { A, B, C, AB, BC, CA, ABC };
 
-long MilliSecondsSinceEpoch();
+static long MilliSecondsSinceEpoch() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>
+      (std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+}
 
-long NanoSecondsSinceEpoch();
+static long NanoSecondsSinceEpoch() {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>
+      (std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+}
+
 
 std::default_random_engine &RandomEngine();
 Float Random();
@@ -131,6 +147,8 @@ class Triangle {
     }
   }
 
+  float DistanceTo(const Vec3& point);
+
   Vec3 a, b, c;
 
  private:
@@ -178,7 +196,7 @@ void DistanceToTriangles2(const std::vector<Triangle> &triangles,
 
 void MinimumDistanceToTriangles(const std::vector<Triangle> &triangles,
                                 const Points3 &points,
-                                Vec *minimum_distances);
+                                Vec *squared_distances);
 
 void SamplePointsOnTriangles(const std::vector<Triangle> &triangles, float density, Points3 *points);
 

@@ -145,7 +145,6 @@ TEST(IntegrationTest, Sampling) {
   Vec dist;
   MinimumDistanceToTriangles({triangle}, points, &dist);
 
-
 }
 
 TEST(DistanceToLineTest, Simple) {
@@ -360,6 +359,19 @@ TEST(DistanceOneDirection, ParallelTriangles) {
     triangle2.Translate(normal * d);
     Float rms = MeshToMeshDistanceOneDirection3({triangle1}, {triangle2}, 100);
     ASSERT_NEAR(rms, d, 1e-5);
+  }
+}
+
+TEST(TriangleObject, DistanceToPoint) {
+  for (int i = 0; i < 1000; ++i) {
+    Triangle triangle1(Vec3::Random(), Vec3::Random(), Vec3::Random());
+    Vec3 p = Vec3::Random();
+    float d = triangle1.DistanceTo(p);
+
+    Vec dist;
+    MinimumDistanceToTriangles({triangle1}, p, &dist);
+    ASSERT_EQ(1, dist.size());
+    ASSERT_NEAR(d * d, dist[0], 1e-6);
   }
 }
 

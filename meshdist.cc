@@ -23,16 +23,6 @@ using Points3 = Eigen::Matrix<Float, 3, Dynamic>;
 using Points2d = Eigen::Matrix<Float, 2, Dynamic>;
 using Points2i = Eigen::Matrix<int, 2, Dynamic>;
 
-long MilliSecondsSinceEpoch() {
-  return std::chrono::duration_cast<std::chrono::milliseconds>
-      (std::chrono::high_resolution_clock::now().time_since_epoch()).count();
-}
-
-long NanoSecondsSinceEpoch() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>
-      (std::chrono::high_resolution_clock::now().time_since_epoch()).count();
-}
-
 Float Random() {
   thread_local static std::uniform_real_distribution<Float> dist{0, 1};
   return dist(RandomEngine());
@@ -218,7 +208,7 @@ void DistanceToTriangles(const std::vector<Triangle> &triangles, const Points3 &
   int num_triangles = static_cast<int>(triangles.size());
   int num_points = static_cast<int>(points.cols());
 
-#pragma omp parallel for if(USE_OMP)
+#pragma omp parallel for if(USE_OMP) schedule(SCHEDULE)
   for (int j = 0; j < num_triangles; ++j) {
     Mat34 T;
     Triangle yz_triangle = triangles[j];
@@ -237,19 +227,15 @@ void DistanceToTriangles(const std::vector<Triangle> &triangles, const Points3 &
 
       Float dist;
       switch (part) {
-        case Part::A:
+        case Part::A:dist = Tpoint.norm();
+          break;
+        case Part::B:Tpoint(2) -= yz_triangle.b(2);
           dist = Tpoint.norm();
           break;
-        case Part::B:
-          Tpoint(2) -= yz_triangle.b(2);
+        case Part::C:Tpoint.bottomRows(2) -= yz_triangle.c.bottomRows(2);
           dist = Tpoint.norm();
           break;
-        case Part::C:
-          Tpoint.bottomRows(2) -= yz_triangle.c.bottomRows(2);
-          dist = Tpoint.norm();
-          break;
-        case Part::AB:
-          dist = Tpoint.topRows(2).norm();
+        case Part::AB:dist = Tpoint.topRows(2).norm();
           break;
         case Part::BC: {
           if (first_sin_cos_bc) {
@@ -277,8 +263,7 @@ void DistanceToTriangles(const std::vector<Triangle> &triangles, const Points3 &
           dist = std::sqrt(z * z + Tpoint(0) * Tpoint(0));
           break;
         }
-        case Part::ABC:
-          dist = std::abs(Tpoint(0));
+        case Part::ABC:dist = std::abs(Tpoint(0));
           break;
       }
       all_distances->coeffRef(i, j) = dist;
@@ -293,7 +278,7 @@ void DistanceToTriangles2(const std::vector<Triangle> &triangles, const Points3 
 
   int num_triangles = static_cast<int>(triangles.size());
 
-#pragma omp parallel for if(USE_OMP)
+#pragma omp parallel for if(USE_OMP) schedule(SCHEDULE)
   for (int j = 0; j < num_triangles; ++j) {
     Mat34 T;
     Triangle yz_triangle = triangles[j];
@@ -394,19 +379,15 @@ void DistanceToTriangles2(const std::vector<Triangle> &triangles, const Points3 
 
       Float dist;
       switch (part) {
-        case Part::A:
+        case Part::A:dist = Tpoint.norm();
+          break;
+        case Part::B:Tpoint(2) -= p2(1);
           dist = Tpoint.norm();
           break;
-        case Part::B:
-          Tpoint(2) -= p2(1);
+        case Part::C:Tpoint.bottomRows(2) -= p3;
           dist = Tpoint.norm();
           break;
-        case Part::C:
-          Tpoint.bottomRows(2) -= p3;
-          dist = Tpoint.norm();
-          break;
-        case Part::AB:
-          dist = Tpoint.topRows(2).norm();
+        case Part::AB:dist = Tpoint.topRows(2).norm();
           break;
         case Part::BC: {
           if (first_sin_cos_bc) {
@@ -433,8 +414,7 @@ void DistanceToTriangles2(const std::vector<Triangle> &triangles, const Points3 
           dist = std::sqrt(z * z + Tpoint(0) * Tpoint(0));
           break;
         }
-        case Part::ABC:
-          dist = std::abs(Tpoint(0));
+        case Part::ABC:dist = std::abs(Tpoint(0));
           break;
       }
       all_distances->coeffRef(i, j) = dist;
@@ -444,9 +424,12 @@ void DistanceToTriangles2(const std::vector<Triangle> &triangles, const Points3 
 
 void MinimumDistanceToTriangles(const std::vector<Triangle> &triangles,
                                 const Points3 &points,
-                                Vec *minimum_distances) {
+                                Vec *squared_distances) {
   const int num_triangles = static_cast<int>(triangles.size());
   const int num_points = static_cast<int>(points.cols());
+
+  BOOST_LOG_TRIVIAL(debug) << "Computing minimum distances from " << num_points
+                           << " points to " << num_triangles << " triangles.";
 
   std::vector<std::unique_ptr<Float[]>> all_local_distances;
 
@@ -456,7 +439,7 @@ void MinimumDistanceToTriangles(const std::vector<Triangle> &triangles,
     std::fill(local_distances.get(), local_distances.get() + num_points,
               std::numeric_limits<Float>::max());
 
-#pragma omp for
+#pragma omp for schedule(SCHEDULE)
     for (int j = 0; j < num_triangles; ++j) {
       Mat34 T;
       Triangle yz_triangle = triangles[j];
@@ -483,7 +466,7 @@ void MinimumDistanceToTriangles(const std::vector<Triangle> &triangles,
         Vec3 Tpoint;
 
         Tpoint(0) = T.topLeftCorner<1, 3>() * p + T(0, 3);
-        Float xdist = std::abs(Tpoint(0));
+        Float xdist = Tpoint(0) * Tpoint(0);
 
         Float current_minimum = local_distances[i];
         if (xdist > current_minimum) {
@@ -494,7 +477,8 @@ void MinimumDistanceToTriangles(const std::vector<Triangle> &triangles,
         Tpoint.tail<2>() = T.bottomLeftCorner<2, 3>() * p + T.bottomRightCorner<2, 1>();
         auto point_yz = Tpoint.tail<2>();
 
-        if (point_yz(0) < 0 && std::max(-point_yz(0), std::abs(point_yz(1))) > current_minimum) {
+        auto yz_max = std::max(-point_yz(0), std::abs(point_yz(1)));
+        if (point_yz(0) < 0 && yz_max * yz_max > current_minimum) {
           continue;
         }
 
@@ -537,19 +521,15 @@ void MinimumDistanceToTriangles(const std::vector<Triangle> &triangles,
 
         Float dist;
         switch (part) {
-          case Part::A:
-            dist = Tpoint.norm();
+          case Part::A:dist = Tpoint.squaredNorm();
             break;
-          case Part::B:
-            Tpoint(2) -= p2(1);
-            dist = Tpoint.norm();
+          case Part::B:Tpoint(2) -= p2(1);
+            dist = Tpoint.squaredNorm();
             break;
-          case Part::C:
-            Tpoint.bottomRows(2) -= p3;
-            dist = Tpoint.norm();
+          case Part::C:Tpoint.bottomRows(2) -= p3;
+            dist = Tpoint.squaredNorm();
             break;
-          case Part::AB:
-            dist = Tpoint.topRows(2).norm();
+          case Part::AB:dist = Tpoint.topRows(2).squaredNorm();
             break;
           case Part::BC: {
             if (first_sin_cos_bc) {
@@ -560,7 +540,7 @@ void MinimumDistanceToTriangles(const std::vector<Triangle> &triangles,
               first_sin_cos_bc = false;
             }
             Float z = sin_bc * Tpoint(1) + cos_bc * (Tpoint(2) - p2(1));
-            dist = std::sqrt(z * z + Tpoint(0) * Tpoint(0));
+            dist = z * z + Tpoint(0) * Tpoint(0);
             break;
           }
           case Part::CA: {
@@ -572,11 +552,10 @@ void MinimumDistanceToTriangles(const std::vector<Triangle> &triangles,
             }
 
             Float z = sin_ca * Tpoint(1) + cos_ca * Tpoint(2);
-            dist = std::sqrt(z * z + Tpoint(0) * Tpoint(0));
+            dist = z * z + Tpoint(0) * Tpoint(0);
             break;
           }
-          case Part::ABC:
-            dist = xdist;
+          case Part::ABC:dist = xdist;
             break;
         }
 
@@ -589,12 +568,12 @@ void MinimumDistanceToTriangles(const std::vector<Triangle> &triangles,
     all_local_distances.push_back(std::move(local_distances));
   }
 
-  minimum_distances->resize(num_points);
+  squared_distances->resize(num_points);
   for (int k = 0; k < all_local_distances.size(); ++k) {
     for (size_t i = 0; i < num_points; ++i) {
       Float value = all_local_distances[k][i];
-      if (k == 0 || value < minimum_distances->coeff(i)) {
-        minimum_distances->coeffRef(i) = value;
+      if (k == 0 || value < squared_distances->coeff(i)) {
+        squared_distances->coeffRef(i) = value;
       }
     }
   }
@@ -645,6 +624,11 @@ void SamplePointsOnTriangles(const std::vector<Triangle> &triangles, float densi
     }
   }
   Expects(k == num_samples);
+
+  Eigen::PermutationMatrix<Dynamic, Dynamic> perm(points->cols());
+  perm.setIdentity();
+  std::shuffle(perm.indices().data(), perm.indices().data() + perm.indices().size(), RandomEngine());
+  *points *= perm; // permute columns
 }
 
 float MeshToMeshDistanceOneDirection(const std::vector<Triangle> &a,
@@ -658,12 +642,12 @@ float MeshToMeshDistanceOneDirection(const std::vector<Triangle> &a,
   auto start = MilliSecondsSinceEpoch();
   DistanceToTriangles2(b, points, &all_distances);
   auto elapsed = MilliSecondsSinceEpoch() - start;
-  LOG(elapsed);
+  BOOST_LOG_TRIVIAL(debug) << elapsed;
 
   int num_points = static_cast<int>(points.cols());
 
   float rms = 0;
-#pragma omp parallel for reduction(+:rms) if (USE_OMP)
+#pragma omp parallel for reduction(+:rms) if (USE_OMP) schedule(SCHEDULE)
   for (int i = 0; i < num_points; ++i) {
     float min_distance = all_distances.row(i).minCoeff();
     rms += min_distance * min_distance;
@@ -692,7 +676,7 @@ float MeshToMeshDistanceOneDirection2(const std::vector<Triangle> &a,
 
   Expects(!all_distances.IsRowMajor);
 
-#pragma omp parallel for num_threads(num_threads) if (USE_OMP)
+#pragma omp parallel for num_threads(num_threads) if (USE_OMP) schedule(SCHEDULE)
   for (int j = 0; j < num_triangles; ++j) {
     Mat34 T;
     Triangle yz_triangle = b[j];
@@ -757,19 +741,15 @@ float MeshToMeshDistanceOneDirection2(const std::vector<Triangle> &a,
 
       Float dist;
       switch (part) {
-        case Part::A:
+        case Part::A:dist = Tpoint.norm();
+          break;
+        case Part::B:Tpoint(2) -= p2(1);
           dist = Tpoint.norm();
           break;
-        case Part::B:
-          Tpoint(2) -= p2(1);
+        case Part::C:Tpoint.bottomRows(2) -= p3;
           dist = Tpoint.norm();
           break;
-        case Part::C:
-          Tpoint.bottomRows(2) -= p3;
-          dist = Tpoint.norm();
-          break;
-        case Part::AB:
-          dist = Tpoint.topRows(2).norm();
+        case Part::AB:dist = Tpoint.topRows(2).norm();
           break;
         case Part::BC: {
           if (first_sin_cos_bc) {
@@ -795,8 +775,7 @@ float MeshToMeshDistanceOneDirection2(const std::vector<Triangle> &a,
           dist = std::sqrt(z * z + Tpoint(0) * Tpoint(0));
           break;
         }
-        case Part::ABC:
-          dist = std::abs(Tpoint(0));
+        case Part::ABC:dist = std::abs(Tpoint(0));
           break;
       }
 
@@ -810,7 +789,7 @@ float MeshToMeshDistanceOneDirection2(const std::vector<Triangle> &a,
 
   auto rms = std::sqrt(all_distances.rowwise().minCoeff().squaredNorm() / static_cast<Float>(num_points));
   auto elapsed = MilliSecondsSinceEpoch() - start;
-  LOG(elapsed);
+  BOOST_LOG_TRIVIAL(debug) << elapsed;
   return rms;
 }
 
@@ -824,7 +803,7 @@ float MeshToMeshDistanceOneDirection3(const std::vector<Triangle> &from,
 
   int num_triangles = to.size();
   int num_points = points.cols();
-  LOG(num_triangles << ", " << num_points);
+  BOOST_LOG_TRIVIAL(debug) << num_triangles << ", " << num_points;
 
   auto start = MilliSecondsSinceEpoch();
   const int n = static_cast<int>(points.cols());
@@ -832,17 +811,75 @@ float MeshToMeshDistanceOneDirection3(const std::vector<Triangle> &from,
   Vec minimum_distances;
   MinimumDistanceToTriangles(to, points, &minimum_distances);
 
-  auto rms = std::sqrt(minimum_distances.squaredNorm() / static_cast<Float>(n));
-
   auto elapsed = MilliSecondsSinceEpoch() - start;
-  LOG(elapsed);
+  BOOST_LOG_TRIVIAL(debug) << elapsed;
+
+  auto rms = std::sqrt(minimum_distances.sum() / static_cast<Float>(n));
+  BOOST_LOG_TRIVIAL(debug) << "RMS: " << rms;
 
   return rms;
 }
 
 float MeshToMeshDistance(const std::vector<Triangle> &a, const std::vector<Triangle> &b) {
-  float d1 = MeshToMeshDistanceOneDirection3(a, b, 100000);
-  float d2 = MeshToMeshDistanceOneDirection3(b, a, 100000);
+  auto start = MilliSecondsSinceEpoch();
+
+  float d1 = MeshToMeshDistanceOneDirection3(a, b, SAMPLING_DENSITY);
+  float d2 = MeshToMeshDistanceOneDirection3(b, a, SAMPLING_DENSITY);
+
+  auto elapsed = MilliSecondsSinceEpoch() - start;
+  BOOST_LOG_TRIVIAL(debug) << "Time elapsed (MeshToMeshDistance): " << elapsed << " ms";
   return (d1 + d2) * 0.5;
 }
+
+float Triangle::DistanceTo(const Vec3 &point) {
+  Mat34 T;
+  Triangle yz_triangle = *this;
+  YZTransform(&yz_triangle, &T);
+
+  Vec3 Tpoint = ApplyMat34(T, point);
+  auto parts = FindClosestPart(yz_triangle, Tpoint);
+
+  Float sin_bc, cos_bc, sin_ca, cos_ca;
+
+  Part part = parts[0];
+
+  Float dist;
+  switch (part) {
+    case Part::A:dist = Tpoint.norm();
+      break;
+    case Part::B:Tpoint(2) -= yz_triangle.b(2);
+      dist = Tpoint.norm();
+      break;
+    case Part::C:Tpoint.bottomRows(2) -= yz_triangle.c.bottomRows(2);
+      dist = Tpoint.norm();
+      break;
+    case Part::AB:dist = Tpoint.topRows(2).norm();
+      break;
+    case Part::BC: {
+      Float theta_bc = -std::atan2(yz_triangle.c(2) - yz_triangle.b(2), yz_triangle.c(1));
+      sin_bc = std::sin(theta_bc);
+      cos_bc = std::cos(theta_bc);
+
+      Float z;
+      z = sin_bc * Tpoint(1) + cos_bc * (Tpoint(2) - yz_triangle.b(2));
+      dist = std::sqrt(z * z + Tpoint(0) * Tpoint(0));
+      break;
+    }
+    case Part::CA: {
+      Float theta_ca = -std::atan2(yz_triangle.c(2), yz_triangle.c(1));
+      sin_ca = std::sin(theta_ca);
+      cos_ca = std::cos(theta_ca);
+
+      Float z;
+      z = sin_ca * Tpoint(1) + cos_ca * Tpoint(2);
+      dist = std::sqrt(z * z + Tpoint(0) * Tpoint(0));
+      break;
+    }
+    case Part::ABC:dist = std::abs(Tpoint(0));
+      break;
+  }
+
+  return dist;
+}
+
 }

@@ -1,81 +1,136 @@
+#define CGAL_HAS_NO_THREADS 1
+
 #include <iostream>
 #include <chrono>
+#include <ostream>
+#include <iomanip>
 #include "meshdist.h"
-#include "TriMesh.h"
+#include "mesh_io.h"
+#include "meshdist_cgal.h"
+
+#include <boost/log/expressions.hpp>
+#include <boost/log/core.hpp>
+#include <boost/log/trivial.hpp>
+
 
 using namespace meshdist;
-using namespace trimesh;
-
-void ReadMesh(const std::string &filename, std::vector<Triangle> *triangles) {
-  TriMesh *m = TriMesh::read(filename);
-  assert(m != nullptr);
-  m->need_faces();
-  triangles->reserve(triangles->size() + m->faces.size());
-  LOG(m->faces.size());
-  for (int j = 0; j < m->faces.size(); ++j) {
-    triangles->emplace_back(
-        Vec3{m->vertices[m->faces[j][0]][0], m->vertices[m->faces[j][0]][1],
-             m->vertices[m->faces[j][0]][2]},
-        Vec3{m->vertices[m->faces[j][1]][0], m->vertices[m->faces[j][1]][1],
-             m->vertices[m->faces[j][1]][2]},
-        Vec3{m->vertices[m->faces[j][2]][0], m->vertices[m->faces[j][2]][1],
-             m->vertices[m->faces[j][2]][2]}
-    );
-  }
-  delete m;
-}
 
 int main() {
   Eigen::initParallel();
+  boost::log::core::get()->set_filter(
+      boost::log::trivial::severity >= boost::log::trivial::debug
+  );
 
-//  std::string filename =
-//      "/media/daeyun/Data/data/shapenetcore/ShapeNetCore.v2/03624134/3b1f7f066991f2d45969e7cd6a0b6a55/models/model_normalized.obj";
-//  std::string filename2 =
-//      "/media/daeyun/Data/data/shapenetcore/ShapeNetCore.v2/03624134/3cbec0d04a115d9c239ffdb3f2fb535d/models/model_normalized.obj";
-  std::string filename = "/media/daeyun/Data/data/shapenetcore/ShapeNetCore.v2/03001627/1a6f615e8b1b5ae4dbbc9440457e303e/models/model_normalized.obj";
-  std::string filename2 = "/media/daeyun/Data/data/shapenetcore/ShapeNetCore.v2/03001627/1a8bbf2994788e2743e99e0cae970928/models/model_normalized.obj";
+  std::map<std::string, std::unique_ptr<std::vector<Triangle>>> gt_meshes;
+  std::map<std::string, std::unique_ptr<std::vector<Triangle>>> fssr_meshes;
+  const int skip = 300;
+  const int repeat = 10;
+  std::string experiments[] = {"novelview", "novelmodel", "novelclass"};
 
-  std::vector<Triangle> triangles;
-  ReadMesh(filename, &triangles);
+  int num_max_threads = omp_get_max_threads();
+  BOOST_LOG_TRIVIAL(info) << "max_threads: " << num_max_threads;
 
-  std::vector<Triangle> triangles2;
-  ReadMesh(filename2, &triangles2);
+  for (int k = 1; k <= 2 * num_max_threads; ++k) {
+//  for (int k = num_max_threads; k <= num_max_threads; ++k) {
+//  for (int k = 2; k <= num_max_threads; k+=10) {
+    omp_set_num_threads(k);
+    int num_threads = omp_get_max_threads();
+    BOOST_LOG_TRIVIAL(info) << "threads: " << num_threads;
 
-  auto start = MilliSecondsSinceEpoch();
+    std::vector<double> cgal_elapsed_list;
+    std::vector<double> meshdist_elapsed_list;
 
-  float d1 = MeshToMeshDistance(triangles, triangles2);
+    for (int l = 0; l < repeat; ++l) {
+      int total_count = 0;
+      double cgal_elapsed = 0;
+      double meshdist_elapsed = 0;
 
-  std::cout << d1 << std::endl;
+      for (int j = 0; j < 3; ++j) {
+        float sum_meshdist = 0;
+        float sum_cgal = 0;
+        int count = 0;
 
-  auto end = MilliSecondsSinceEpoch() - start;
-  LOG(end);
+        for (int i = 0; i < 600; i += skip) {
+          std::string basedir = "/data/daeyun/shrec12_recon_links/";
 
-  return 0;
+          std::ostringstream dir_stream;
+          dir_stream << basedir;
+          dir_stream << experiments[j] << "/";
+          dir_stream << std::setw(3) << std::setfill('0') << i;
 
-#if 0
-  std::vector<Triangle> triangles;
-  int num_triangles = 2000;
-  int num_points = 2000;
-  for (int i = 0; i < num_triangles; ++i) {
-    triangles.emplace_back(meshdist::Vec3::Random(),
-                           Vec3::Random(),
-                           Vec3::Random());
-  }
-  auto points = Points3d::Random(3, num_points);
+          std::string gt_filename = dir_stream.str() + "/gt.off";
+          std::string fssr_filename = dir_stream.str() + "/fssr.off";
 
-  std::vector<std::vector<Float>> all_distances;
+          if (gt_meshes.find(gt_filename) == gt_meshes.end()) {
+            auto mesh = std::make_unique<std::vector<Triangle>>();
+            io::ReadTriangles(gt_filename, [&](auto v) {
+              mesh->emplace_back(
+                  Vec3(v[0][0], v[0][1], v[0][2]),
+                  Vec3(v[1][0], v[1][1], v[1][2]),
+                  Vec3(v[2][0], v[2][1], v[2][2])
+              );
+            });
+            gt_meshes[gt_filename] = std::move(mesh);
+          }
+          std::vector<Triangle> *triangles = gt_meshes[gt_filename].get();
 
-  long best = std::numeric_limits<long>::max();
-  for (int i = 0; i < 100; ++i) {
-    auto start = MilliSecondsSinceEpoch();
-    DistanceToTriangles(triangles, points, &all_distances);
-    auto end = MilliSecondsSinceEpoch() - start;
-    if (end < best) {
-      best = end;
+          if (fssr_meshes.find(fssr_filename) == fssr_meshes.end()) {
+            auto mesh = std::make_unique<std::vector<Triangle>>();
+            io::ReadTriangles(fssr_filename, [&](auto v) {
+              mesh->emplace_back(
+                  Vec3(v[0][0], v[0][1], v[0][2]),
+                  Vec3(v[1][0], v[1][1], v[1][2]),
+                  Vec3(v[2][0], v[2][1], v[2][2])
+              );
+            });
+            fssr_meshes[fssr_filename] = std::move(mesh);
+          }
+          std::vector<Triangle> *triangles2 = fssr_meshes[fssr_filename].get();
+
+          Points3 points, points2;
+          meshdist::SamplePointsOnTriangles(*triangles, 900, &points);
+          meshdist::SamplePointsOnTriangles(*triangles, 900, &points2);
+
+          float mean_point_distance = (points - points2).colwise().norm().mean();
+          BOOST_LOG_TRIVIAL(debug) << "Mean point distance: " << mean_point_distance;
+
+          long start, end;
+
+          start = meshdist::MilliSecondsSinceEpoch();
+          float dist_cgal = meshdist_cgal::MeshToMeshDistance(*triangles, *triangles2);
+          end = meshdist::MilliSecondsSinceEpoch();
+          sum_cgal += dist_cgal / mean_point_distance;
+          BOOST_LOG_TRIVIAL(debug) << "cgal: " << dist_cgal;
+          cgal_elapsed += end - start;
+
+          start = meshdist::MilliSecondsSinceEpoch();
+          // TODO
+//          float dist_meshdist = meshdist::MeshToMeshDistance(*triangles, *triangles2);
+          float dist_meshdist = 0;
+          end = meshdist::MilliSecondsSinceEpoch();
+          sum_meshdist += dist_meshdist / mean_point_distance;
+          BOOST_LOG_TRIVIAL(debug) << "meshdist: " << dist_meshdist;
+          meshdist_elapsed += end - start;
+
+          count++;
+          total_count++;
+        }
+
+        BOOST_LOG_TRIVIAL(debug) << "MeshToMeshDistance(cgal): " << sum_cgal / count;
+        BOOST_LOG_TRIVIAL(debug) << "MeshToMeshDistance(meshdist): " << sum_meshdist / count;
+      }
+
+      cgal_elapsed_list.push_back(cgal_elapsed / total_count);
+      meshdist_elapsed_list.push_back(meshdist_elapsed / total_count);
     }
+
+    double cgal_best = *std::min_element(cgal_elapsed_list.begin(), cgal_elapsed_list.end());
+    double meshdist_best = *std::min_element(meshdist_elapsed_list.begin(), meshdist_elapsed_list.end());
+
+    BOOST_LOG_TRIVIAL(info) << "Elapsed(cgal): " << cgal_best;
+    BOOST_LOG_TRIVIAL(info) << "Elapsed(meshdist): " << meshdist_best;
+
   }
-  LOG(best);
 
   return 0;
-#endif
 }
